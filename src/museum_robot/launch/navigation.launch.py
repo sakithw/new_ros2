@@ -55,7 +55,7 @@ def generate_launch_description():
                                              'velocity_smoother']}]),
         ]),
         TimerAction(period=22.0, actions=[
-            Node(package='sllidar_ros2', executable='sllidar_node',
+            Node(package='rplidar_ros', executable='rplidar_composition',
                  name='sllidar_node', output='screen',
                  respawn=True, respawn_delay=25.0,
                  parameters=[{'channel_type':'serial',
@@ -63,6 +63,6 @@ def generate_launch_description():
                                'serial_baudrate':1000000,
                                'frame_id':'laser',
                                'angle_compensate':True,
-                               'scan_mode':'DenseBoost'}])
+                               'scan_mode':'Standard'}])
         ]),
     ])
