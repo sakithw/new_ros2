@@ -14,7 +14,7 @@ TICKS_PER_M      = PULSES_PER_REV / WHEEL_CIRCUM_M
 TF_HZ            = 50.0
 ODOM_HZ          = 20.0
 WATCHDOG_S       = 0.5
-PORT             = '/dev/ttyACM0'
+PORT             = '/dev/ttyS0'
 BAUD             = 115200
 
 class ArduinoBridge(Node):
@@ -103,6 +103,8 @@ class ArduinoBridge(Node):
                                         float(parts[2]))
                                 except ValueError:
                                     pass
+                        elif line:
+                            self.get_logger().info(f'Arduino: {line}')
             except Exception as e:
                 self._ser = None
                 self.get_logger().warn(f'Serial error: {e}, retrying in 2s')
@@ -120,15 +122,36 @@ class ArduinoBridge(Node):
         self._last_cmd = time.time()
         lx = msg.linear.x
         az = msg.angular.z
+
+        # Determine desired movement state
         if abs(lx) < 0.01 and abs(az) < 0.01:
-            self._send('S')
-            return
-        if abs(lx) >= 0.01:
-            dist_cm = abs(lx) * 0.1 * 100
-            self._send(f'F{dist_cm:.1f}' if lx > 0 else f'B{dist_cm:.1f}')
-        elif abs(az) >= 0.01:
-            deg = az * 0.1 * (180.0 / math.pi)
-            self._send(f'T{deg:.1f}')
+            cmd_str = 'S\n'
+            state = 'STOP'
+        elif lx > 0.01:
+            cmd_str = 'F1000.0\n'  # Large distance, interrupted by S
+            state = 'FWD'
+        elif lx < -0.01:
+            cmd_str = 'B1000.0\n'
+            state = 'BWD'
+        elif az > 0.01:
+            cmd_str = 'T360.0\n'   # Large angle, interrupted by S
+            state = 'LEFT'
+        elif az < -0.01:
+            cmd_str = 'T-360.0\n'
+            state = 'RIGHT'
+        else:
+            cmd_str = 'S\n'
+            state = 'STOP'
+
+        # Initialize state tracking if not present
+        if not hasattr(self, '_current_state'):
+            self._current_state = 'UNKNOWN'
+
+        # Only send command if the state has changed to prevent buffer spam
+        if state != self._current_state:
+            self._send(cmd_str)
+            self.get_logger().info(f'Sent to Arduino: {cmd_str.strip()}')
+            self._current_state = state
 
     def _watchdog_cb(self):
         if time.time() - self._last_cmd > WATCHDOG_S:
