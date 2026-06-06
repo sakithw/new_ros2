@@ -4,7 +4,9 @@ from rclpy.executors import MultiThreadedExecutor
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
 from tf2_ros import TransformBroadcaster
-import serial, threading, math, time
+import serial, threading, math, time, re
+
+ODOM_RE = re.compile(r'(-?\d+),(-?\d+),([-\d.]+)')
 
 WHEEL_DIAMETER_M = 0.12
 TRACK_WIDTH_M    = 0.30
@@ -31,7 +33,7 @@ class ArduinoBridge(Node):
         self._publish_tf(self.get_clock().now(), 0.0, 0.0, 0.0)
         self.create_timer(1.0 / TF_HZ,   self._tf_timer_cb)
         self.create_timer(1.0 / ODOM_HZ, self._odom_timer_cb)
-        self.create_timer(WATCHDOG_S,     self._watchdog_cb)
+        # self.create_timer(WATCHDOG_S, self._watchdog_cb)  # disabled: collides with ODOM stream
         threading.Thread(target=self._serial_reader, daemon=True).start()
         self.get_logger().info('arduino_bridge ready.')
 
@@ -88,34 +90,41 @@ class ArduinoBridge(Node):
     def _serial_reader(self):
         while rclpy.ok():
             try:
-                with serial.Serial(PORT, BAUD, timeout=1,
+                with serial.Serial(PORT, BAUD, timeout=0.1,
                                    xonxoff=False, rtscts=False, dsrdtr=False) as ser:
                     self._ser = ser
                     ser.reset_input_buffer()
                     self.get_logger().info(f'Serial opened on {PORT} @ {BAUD}')
+                    buf = b''
                     while rclpy.ok():
                         try:
-                            raw = ser.readline()
+                            chunk = ser.read(ser.in_waiting or 64)
                         except serial.SerialException:
                             ser.reset_input_buffer()
+                            buf = b''
                             continue
-                        if not raw:
-                            continue
-                        line = raw.decode('utf-8', errors='ignore').strip()
-                        if not line:
-                            continue
-                        if line.startswith('ODOM:'):
-                            parts = line[5:].split(',')
-                            if len(parts) == 3:
+                        if chunk:
+                            buf += chunk
+                        if len(buf) > 4096:
+                            buf = buf[-2048:]
+                        while b'\n' in buf:
+                            raw, buf = buf.split(b'\n', 1)
+                            line = raw.decode('utf-8', errors='ignore').strip()
+                            if not line:
+                                continue
+                            # Use regex to extract int,int,float payload even when
+                            # leading "ODOM:" prefix bytes are dropped by UART noise
+                            m = ODOM_RE.search(line)
+                            if m:
                                 try:
                                     self._handle_odom(
-                                        int(parts[0]),
-                                        int(parts[1]),
-                                        float(parts[2]))
+                                        int(m.group(1)),
+                                        int(m.group(2)),
+                                        float(m.group(3)))
                                 except ValueError:
                                     pass
-                        else:
-                            self.get_logger().info(f'Arduino: {line}')
+                            else:
+                                self.get_logger().info(f'Arduino: {line}')
             except Exception as e:
                 self._ser = None
                 self.get_logger().warn(f'Serial error: {e}, retrying in 2s')
