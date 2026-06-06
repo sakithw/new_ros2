@@ -13,8 +13,8 @@ WHEEL_CIRCUM_M   = math.pi * WHEEL_DIAMETER_M
 TICKS_PER_M      = PULSES_PER_REV / WHEEL_CIRCUM_M
 TF_HZ            = 50.0
 ODOM_HZ          = 20.0
-WATCHDOG_S       = 0.5
-PORT             = '/dev/ttyS0'
+WATCHDOG_S       = 2.0
+PORT             = '/dev/ttyAMA0'
 BAUD             = 115200
 
 class ArduinoBridge(Node):
@@ -88,11 +88,22 @@ class ArduinoBridge(Node):
     def _serial_reader(self):
         while rclpy.ok():
             try:
-                with serial.Serial(PORT, BAUD, timeout=1) as ser:
+                with serial.Serial(PORT, BAUD, timeout=1,
+                                   xonxoff=False, rtscts=False, dsrdtr=False) as ser:
                     self._ser = ser
+                    ser.reset_input_buffer()
                     self.get_logger().info(f'Serial opened on {PORT} @ {BAUD}')
                     while rclpy.ok():
-                        line = ser.readline().decode('utf-8', errors='ignore').strip()
+                        try:
+                            raw = ser.readline()
+                        except serial.SerialException:
+                            ser.reset_input_buffer()
+                            continue
+                        if not raw:
+                            continue
+                        line = raw.decode('utf-8', errors='ignore').strip()
+                        if not line:
+                            continue
                         if line.startswith('ODOM:'):
                             parts = line[5:].split(',')
                             if len(parts) == 3:
@@ -103,7 +114,7 @@ class ArduinoBridge(Node):
                                         float(parts[2]))
                                 except ValueError:
                                     pass
-                        elif line:
+                        else:
                             self.get_logger().info(f'Arduino: {line}')
             except Exception as e:
                 self._ser = None
@@ -115,6 +126,7 @@ class ArduinoBridge(Node):
             try:
                 if self._ser and self._ser.is_open:
                     self._ser.write((cmd + '\n').encode())
+                    time.sleep(0.05)
             except Exception:
                 pass
 

@@ -27,7 +27,7 @@ def generate_launch_description():
                  name='slam_toolbox', output='screen',
                  parameters=[slam_cfg])
         ]),
-        TimerAction(period=22.0, actions=[
+        TimerAction(period=24.0, actions=[
             Node(package='rplidar_ros', executable='rplidar_composition',
                  name='sllidar_node', output='screen',
                  respawn=True, respawn_delay=25.0,
