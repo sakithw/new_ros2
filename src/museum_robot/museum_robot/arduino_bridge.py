@@ -17,6 +17,7 @@ ODOM_HZ           = 20.0
 PORT              = '/dev/ttyAMA0'
 BAUD              = 115200
 WATCHDOG_S        = 2.0    # safety only — fires if connection lost, not during normal use
+STOP_LOCKOUT_S    = 0.20   # discard motion cmds arriving within 200ms of a STOP send
 US_OBSTACLE_CM    = 25.0   # auto-stop if front ultrasonic < this while driving forward
 
 # Arduino blocking protocol: send ONE command, Arduino runs until done or S received
@@ -41,6 +42,7 @@ class ArduinoBridge(Node):
         self._last_odom      = time.time()
         self._last_cmd_time  = time.time()
         self._current_state  = 'STOP'
+        self._last_stop_sent = 0.0
         self._us_front_cm    = 999.0
         self._ser  = None
         self._lock = threading.Lock()
@@ -190,11 +192,11 @@ class ArduinoBridge(Node):
         az = msg.angular.z
 
         if abs(lx) < 0.01 and abs(az) < 0.01:
-            # Flask publishes zeros continuously when idle — only act on transition
             if self._current_state != 'STOP':
                 self._send('S')
                 self._current_state = 'STOP'
-                self.get_logger().info('Arduino: S (STOP)')
+                self._last_stop_sent = time.time()
+                self.get_logger().info('Sent: S (STOP)')
             return
 
         new_state = ('FWD'   if lx >  0.01 else
@@ -205,10 +207,15 @@ class ArduinoBridge(Node):
         if new_state == self._current_state:
             return
 
+        # Discard out-of-order motion commands that arrive within the lockout window
+        # after a STOP — these are 100ms-interval fetches that raced with the stop fetch
+        if self._current_state == 'STOP' and time.time() - self._last_stop_sent < STOP_LOCKOUT_S:
+            return
+
         self._current_state = new_state
         cmd = _STATE_CMD[new_state]
         self._send(cmd)
-        self.get_logger().info(f'Arduino: {cmd} ({new_state})')
+        self.get_logger().info(f'Sent: {cmd} ({new_state})')
 
     def _watchdog_cb(self):
         # Safety net only — fires if cmd_vel stops completely (connection lost)
