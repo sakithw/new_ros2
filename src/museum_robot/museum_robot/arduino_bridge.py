@@ -20,8 +20,8 @@ WATCHDOG_S       = 0.15  # fires 150ms after last cmd_vel — stops turn/drive q
 _STATE_CMD = {
     'FWD':   'F1000.0',
     'BWD':   'B1000.0',
-    'LEFT':  'T720.0',
-    'RIGHT': 'T-720.0',
+    'LEFT':  'T10.0',
+    'RIGHT': 'T-10.0',
 }
 
 class ArduinoBridge(Node):
