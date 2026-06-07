@@ -4,9 +4,7 @@ from rclpy.executors import MultiThreadedExecutor
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
 from tf2_ros import TransformBroadcaster
-import serial, threading, math, time, re
-
-ODOM_RE = re.compile(r'(-?\d+),(-?\d+),([-\d.]+)')
+import serial, threading, math, time
 
 WHEEL_DIAMETER_M = 0.12
 TRACK_WIDTH_M    = 0.30
@@ -15,9 +13,18 @@ WHEEL_CIRCUM_M   = math.pi * WHEEL_DIAMETER_M
 TICKS_PER_M      = PULSES_PER_REV / WHEEL_CIRCUM_M
 TF_HZ            = 50.0
 ODOM_HZ          = 20.0
-WATCHDOG_S       = 2.0
 PORT             = '/dev/ttyAMA0'
 BAUD             = 115200
+WATCHDOG_S       = 0.5
+
+# Maps motion state → single Arduino command sent once on state entry.
+# Arduino executes until interrupted by 'S'.
+_STATE_CMD = {
+    'FWD':   'F1000.0',
+    'BWD':   'B1000.0',
+    'LEFT':  'T720.0',   # continuous left turn — stopped by watchdog S
+    'RIGHT': 'T-720.0',  # continuous right turn — stopped by watchdog S
+}
 
 class ArduinoBridge(Node):
     def __init__(self):
@@ -27,13 +34,15 @@ class ArduinoBridge(Node):
         self.cmd_sub  = self.create_subscription(Twist, '/cmd_vel', self._cmd_cb, 10)
         self.x = self.y = self.yaw = 0.0
         self.prev_l = self.prev_r = None
-        self._last_cmd = time.time()
+        self._last_cmd     = time.time()
+        self._last_odom    = time.time()
+        self._current_state = 'STOP'
         self._ser = None
         self._lock = threading.Lock()
         self._publish_tf(self.get_clock().now(), 0.0, 0.0, 0.0)
         self.create_timer(1.0 / TF_HZ,   self._tf_timer_cb)
         self.create_timer(1.0 / ODOM_HZ, self._odom_timer_cb)
-        # self.create_timer(WATCHDOG_S, self._watchdog_cb)  # disabled: collides with ODOM stream
+        self.create_timer(WATCHDOG_S,     self._watchdog_cb)
         threading.Thread(target=self._serial_reader, daemon=True).start()
         self.get_logger().info('arduino_bridge ready.')
 
@@ -50,6 +59,7 @@ class ArduinoBridge(Node):
         self.tf_br.sendTransform(ts)
 
     def _tf_timer_cb(self):
+        # Always fires at 50 Hz regardless of serial state
         self._publish_tf(self.get_clock().now(), self.x, self.y, self.yaw)
 
     def _odom_timer_cb(self):
@@ -70,6 +80,12 @@ class ArduinoBridge(Node):
         self.odom_pub.publish(msg)
 
     def _handle_odom(self, left_ticks, right_ticks, yaw_deg):
+        # Validate ranges
+        if abs(left_ticks) >= 1000000 or abs(right_ticks) >= 1000000:
+            return
+        if yaw_deg < -360.0 or yaw_deg > 360.0:
+            return
+        self._last_odom = time.time()
         yaw = math.radians(yaw_deg)
         if self.prev_l is None:
             self.prev_l = left_ticks
@@ -90,7 +106,7 @@ class ArduinoBridge(Node):
     def _serial_reader(self):
         while rclpy.ok():
             try:
-                with serial.Serial(PORT, BAUD, timeout=0.1,
+                with serial.Serial(PORT, BAUD, timeout=0.05,
                                    xonxoff=False, rtscts=False, dsrdtr=False) as ser:
                     self._ser = ser
                     ser.reset_input_buffer()
@@ -99,10 +115,11 @@ class ArduinoBridge(Node):
                     while rclpy.ok():
                         try:
                             chunk = ser.read(ser.in_waiting or 64)
-                        except serial.SerialException:
-                            ser.reset_input_buffer()
+                        except serial.SerialException as e:
+                            self.get_logger().warn(f'Serial read error: {e}')
                             buf = b''
-                            continue
+                            time.sleep(1.0)
+                            break
                         if chunk:
                             buf += chunk
                         if len(buf) > 4096:
@@ -112,19 +129,17 @@ class ArduinoBridge(Node):
                             line = raw.decode('utf-8', errors='ignore').strip()
                             if not line:
                                 continue
-                            # Use regex to extract int,int,float payload even when
-                            # leading "ODOM:" prefix bytes are dropped by UART noise
-                            m = ODOM_RE.search(line)
-                            if m:
-                                try:
-                                    self._handle_odom(
-                                        int(m.group(1)),
-                                        int(m.group(2)),
-                                        float(m.group(3)))
-                                except ValueError:
-                                    pass
-                            else:
-                                self.get_logger().info(f'Arduino: {line}')
+                            if line[:5] == 'ODOM:':
+                                parts = line[5:].split(',')
+                                if len(parts) == 3:
+                                    try:
+                                        self._handle_odom(
+                                            int(parts[0]),
+                                            int(parts[1]),
+                                            float(parts[2]))
+                                    except ValueError:
+                                        pass
+                            # silently discard non-ODOM lines
             except Exception as e:
                 self._ser = None
                 self.get_logger().warn(f'Serial error: {e}, retrying in 2s')
@@ -144,39 +159,26 @@ class ArduinoBridge(Node):
         lx = msg.linear.x
         az = msg.angular.z
 
-        # Determine desired movement state
         if abs(lx) < 0.01 and abs(az) < 0.01:
-            cmd_str = 'S\n'
-            state = 'STOP'
-        elif lx > 0.01:
-            cmd_str = 'F1000.0\n'  # Large distance, interrupted by S
-            state = 'FWD'
-        elif lx < -0.01:
-            cmd_str = 'B1000.0\n'
-            state = 'BWD'
-        elif az > 0.01:
-            cmd_str = 'T360.0\n'   # Large angle, interrupted by S
-            state = 'LEFT'
-        elif az < -0.01:
-            cmd_str = 'T-360.0\n'
-            state = 'RIGHT'
+            new_state = 'STOP'
+        elif abs(lx) >= 0.01:
+            new_state = 'FWD' if lx > 0 else 'BWD'
         else:
-            cmd_str = 'S\n'
-            state = 'STOP'
+            new_state = 'LEFT' if az > 0 else 'RIGHT'
 
-        # Initialize state tracking if not present
-        if not hasattr(self, '_current_state'):
-            self._current_state = 'UNKNOWN'
+        if new_state == self._current_state:
+            return  # no change — don't spam Arduino
 
-        # Only send command if the state has changed to prevent buffer spam
-        if state != self._current_state:
-            self._send(cmd_str)
-            self.get_logger().info(f'Sent to Arduino: {cmd_str.strip()}')
-            self._current_state = state
+        self._current_state = new_state
+        cmd = 'S' if new_state == 'STOP' else _STATE_CMD[new_state]
+        self._send(cmd)
+        self.get_logger().info(f'Arduino: {cmd} ({new_state})')
 
     def _watchdog_cb(self):
         if time.time() - self._last_cmd > WATCHDOG_S:
-            self._send('S')
+            if self._current_state != 'STOP':
+                self._send('S')
+                self._current_state = 'STOP'
 
 def main():
     rclpy.init()

@@ -1,5 +1,6 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import LaserScan
 
@@ -19,20 +20,29 @@ class ScanFilterNode(Node):
         self.get_logger().info('scan_filter ready: min_range=0.20m')
 
     def cb(self, msg):
-        out = LaserScan()
-        out.header = msg.header
-        out.angle_min = msg.angle_min
-        out.angle_max = msg.angle_max
-        out.angle_increment = msg.angle_increment
-        out.time_increment = msg.time_increment
-        out.scan_time = msg.scan_time
-        out.range_min = RANGE_MIN
-        out.range_max = msg.range_max
-        out.ranges = [r if r >= RANGE_MIN else float('inf') for r in msg.ranges]
-        out.intensities = msg.intensities
-        self.pub.publish(out)
+        try:
+            out = LaserScan()
+            out.header = msg.header
+            out.angle_min = msg.angle_min
+            out.angle_max = msg.angle_max
+            out.angle_increment = msg.angle_increment
+            out.time_increment = msg.time_increment
+            out.scan_time = msg.scan_time
+            out.range_min = RANGE_MIN
+            out.range_max = msg.range_max
+            out.ranges = [r if r >= RANGE_MIN else float('inf') for r in msg.ranges]
+            out.intensities = msg.intensities
+            self.pub.publish(out)
+        except Exception as e:
+            self.get_logger().warn(f'scan_filter cb error: {e}')
 
 def main():
     rclpy.init()
-    rclpy.spin(ScanFilterNode())
-    rclpy.shutdown()
+    node = ScanFilterNode()
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
+    try:
+        executor.spin()
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
