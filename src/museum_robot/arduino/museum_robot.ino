@@ -35,6 +35,9 @@ const float WHEEL_CIRCUM_CM    = WHEEL_DIAMETER_CM * PI;
 const float TICKS_PER_CM       = (float)PULSES_PER_REV / WHEEL_CIRCUM_CM;
 const int   DEFAULT_SPEED      = 100;
 const int   TURN_SPEED         = 100;
+// Wheel trim: increase the slower wheel above 1.0 until robot goes straight
+const float LEFT_SPEED_TRIM    = 1.0;   // range 0.8–1.2
+const float RIGHT_SPEED_TRIM   = 1.0;   // range 0.8–1.2
 const float Kp_straight        = 6.0;
 const unsigned long DEBOUNCE_US = 2000;
 
@@ -118,6 +121,8 @@ void updateIMU() {
 }
 
 void setMotors(int leftSpeed, int rightSpeed) {
+  leftSpeed  = constrain((int)(leftSpeed  * LEFT_SPEED_TRIM),  -255, 255);
+  rightSpeed = constrain((int)(rightSpeed * RIGHT_SPEED_TRIM), -255, 255);
   left_dir  = (leftSpeed  >= 0) ? 1 : -1;
   right_dir = (rightSpeed >= 0) ? 1 : -1;
   if (leftSpeed > 0) {

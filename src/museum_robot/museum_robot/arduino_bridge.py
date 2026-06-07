@@ -142,6 +142,10 @@ class ArduinoBridge(Node):
                                 continue
                             chunk = ser.read(n)
                         except serial.SerialException as e:
+                            if 'no data' in str(e):
+                                # Spurious HUP — keep port open, retry
+                                time.sleep(0.01)
+                                continue
                             self.get_logger().warn(f'Serial read error: {e}')
                             buf = b''
                             time.sleep(1.0)
