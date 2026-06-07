@@ -16,16 +16,20 @@ TF_HZ             = 50.0
 ODOM_HZ           = 20.0
 PORT              = '/dev/ttyAMA0'
 BAUD              = 115200
-WATCHDOG_S        = 2.0    # safety only — fires if connection lost, not during normal use
-STOP_LOCKOUT_S    = 0.20   # discard motion cmds arriving within 200ms of a STOP send
-US_OBSTACLE_CM    = 25.0   # auto-stop if front ultrasonic < this while driving forward
+WATCHDOG_S        = 2.0
+STOP_LOCKOUT_S    = 0.20   # discard motion cmds within 200ms of a STOP send
+US_OBSTACLE_CM    = 20.0   # auto-stop if front ultrasonic < this while driving forward
+REPEAT_HZ         = 5.0    # Hz to repeat drive step commands while button held
+LEFT_TRIM         = 1.0    # wheel speed trim (0.8–1.2); real fix needs Arduino PWM change
+RIGHT_TRIM        = 1.0    # wheel speed trim (0.8–1.2); real fix needs Arduino PWM change
 
-# Arduino blocking protocol: send ONE command, Arduino runs until done or S received
-_STATE_CMD = {
-    'FWD':   'F1000.0',   # Arduino drives forward until S
-    'BWD':   'B1000.0',   # Arduino drives backward until S
-    'LEFT':  'T10.0',     # Arduino turns exactly 10° then stops on its own
-    'RIGHT': 'T-10.0',
+# Short-distance step commands — keep robot in ramp phase, limit effective speed.
+# Subsequent steps are re-sent by _drive_repeat_cb while button is held.
+_STEP_CMD = {
+    'FWD':   'F10.0',
+    'BWD':   'B10.0',
+    'LEFT':  'T15.0',
+    'RIGHT': 'T-15.0',
 }
 
 
@@ -48,9 +52,10 @@ class ArduinoBridge(Node):
         self._lock = threading.Lock()
 
         self._publish_tf(self.get_clock().now(), 0.0, 0.0, 0.0)
-        self.create_timer(1.0 / TF_HZ,   self._tf_timer_cb)
-        self.create_timer(1.0 / ODOM_HZ, self._odom_timer_cb)
-        self.create_timer(WATCHDOG_S,     self._watchdog_cb)
+        self.create_timer(1.0 / TF_HZ,     self._tf_timer_cb)
+        self.create_timer(1.0 / ODOM_HZ,   self._odom_timer_cb)
+        self.create_timer(WATCHDOG_S,       self._watchdog_cb)
+        self.create_timer(1.0 / REPEAT_HZ, self._drive_repeat_cb)
 
         threading.Thread(target=self._serial_reader, daemon=True).start()
         self.get_logger().info('arduino_bridge ready.')
@@ -168,11 +173,12 @@ class ArduinoBridge(Node):
             msg.max_range       = 4.00
             msg.range           = front_cm / 100.0
             self.us_pub.publish(msg)
-            # Obstacle: stop if driving forward and something is close
-            if front_cm < US_OBSTACLE_CM and self._current_state == 'FWD':
-                self._send('S')
-                self._current_state = 'STOP'
-                self.get_logger().warn(f'Obstacle {front_cm:.0f}cm — auto-stopped')
+            if front_cm < US_OBSTACLE_CM:
+                self.get_logger().warn(f'OBSTACLE: {front_cm:.0f}cm')
+                if self._current_state == 'FWD':
+                    self._send('S')
+                    self._current_state = 'STOP'
+                    self._last_stop_sent = time.time()
         except (ValueError, IndexError):
             pass
 
@@ -207,18 +213,30 @@ class ArduinoBridge(Node):
         if new_state == self._current_state:
             return
 
-        # Discard out-of-order motion commands that arrive within the lockout window
-        # after a STOP — these are 100ms-interval fetches that raced with the stop fetch
+        # Discard out-of-order motion commands arriving within 200ms of a STOP
         if self._current_state == 'STOP' and time.time() - self._last_stop_sent < STOP_LOCKOUT_S:
             return
 
+        # Direction change: interrupt in-progress step
+        if self._current_state != 'STOP':
+            self._send('S')
+
         self._current_state = new_state
-        cmd = _STATE_CMD[new_state]
+        cmd = _STEP_CMD[new_state]
         self._send(cmd)
         self.get_logger().info(f'Sent: {cmd} ({new_state})')
 
+    def _drive_repeat_cb(self):
+        """Repeat current drive step at REPEAT_HZ while button held."""
+        state = self._current_state
+        if state == 'STOP':
+            return
+        # Honour lockout: don't re-trigger within 200ms of a stop
+        if time.time() - self._last_stop_sent < STOP_LOCKOUT_S:
+            return
+        self._send(_STEP_CMD[state])
+
     def _watchdog_cb(self):
-        # Safety net only — fires if cmd_vel stops completely (connection lost)
         if time.time() - self._last_cmd_time > WATCHDOG_S:
             if self._current_state != 'STOP':
                 self._send('S')
