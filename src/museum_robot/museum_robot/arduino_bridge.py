@@ -5,7 +5,7 @@ from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Range
 from tf2_ros import TransformBroadcaster
-import serial, threading, math, time
+import serial, threading, math, time, termios
 
 WHEEL_DIAMETER_M  = 0.12
 TRACK_WIDTH_M     = 0.30
@@ -120,13 +120,27 @@ class ArduinoBridge(Node):
             try:
                 with serial.Serial(PORT, BAUD, timeout=0.05,
                                    xonxoff=False, rtscts=False, dsrdtr=False) as ser:
+                    # Disable HUPCL: keeps DTR asserted when port closes so the
+                    # Arduino doesn't reset on every reconnect attempt.
+                    # CLOCAL: ignore modem status lines (CD/RI) — avoids false HUP.
+                    # IGNBRK: ignore UART break condition — avoids spurious EOF.
+                    attr = termios.tcgetattr(ser.fd)
+                    attr[2] |= termios.CLOCAL    # cflag
+                    attr[2] &= ~termios.HUPCL    # cflag
+                    attr[0] |= termios.IGNBRK    # iflag
+                    termios.tcsetattr(ser.fd, termios.TCSANOW, attr)
+
                     self._ser = ser
                     ser.reset_input_buffer()
                     self.get_logger().info(f'Serial opened on {PORT} @ {BAUD}')
                     buf = b''
                     while rclpy.ok():
                         try:
-                            chunk = ser.read(ser.in_waiting or 64)
+                            n = ser.in_waiting
+                            if n == 0:
+                                time.sleep(0.005)
+                                continue
+                            chunk = ser.read(n)
                         except serial.SerialException as e:
                             self.get_logger().warn(f'Serial read error: {e}')
                             buf = b''
