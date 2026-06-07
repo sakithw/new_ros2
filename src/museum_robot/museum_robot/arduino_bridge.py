@@ -14,11 +14,18 @@ WHEEL_CIRCUM_M    = math.pi * WHEEL_DIAMETER_M
 TICKS_PER_M       = PULSES_PER_REV / WHEEL_CIRCUM_M
 TF_HZ             = 50.0
 ODOM_HZ           = 20.0
-DRIVE_HZ          = 10.0
 PORT              = '/dev/ttyAMA0'
 BAUD              = 115200
-MAX_SPEED_MS      = 0.20   # cap forward/back speed for mapping
-US_OBSTACLE_CM    = 25.0   # auto-stop if front ultrasonic reads closer than this
+WATCHDOG_S        = 2.0    # safety only — fires if connection lost, not during normal use
+US_OBSTACLE_CM    = 25.0   # auto-stop if front ultrasonic < this while driving forward
+
+# Arduino blocking protocol: send ONE command, Arduino runs until done or S received
+_STATE_CMD = {
+    'FWD':   'F1000.0',   # Arduino drives forward until S
+    'BWD':   'B1000.0',   # Arduino drives backward until S
+    'LEFT':  'T10.0',     # Arduino turns exactly 10° then stops on its own
+    'RIGHT': 'T-10.0',
+}
 
 
 class ArduinoBridge(Node):
@@ -31,23 +38,22 @@ class ArduinoBridge(Node):
 
         self.x = self.y = self.yaw = 0.0
         self.prev_l = self.prev_r = None
-        self._last_odom     = time.time()
-        self._current_state = 'STOP'
-        self._lx            = 0.0
-        self._us_front_cm   = 999.0   # last ultrasonic reading (default: clear)
+        self._last_odom      = time.time()
+        self._last_cmd_time  = time.time()
+        self._current_state  = 'STOP'
+        self._us_front_cm    = 999.0
         self._ser  = None
         self._lock = threading.Lock()
 
         self._publish_tf(self.get_clock().now(), 0.0, 0.0, 0.0)
-        self.create_timer(1.0 / TF_HZ,    self._tf_timer_cb)
-        self.create_timer(1.0 / ODOM_HZ,  self._odom_timer_cb)
-        self.create_timer(1.0 / DRIVE_HZ, self._drive_timer_cb)
-        # NO watchdog timer — stop button owns stopping
+        self.create_timer(1.0 / TF_HZ,   self._tf_timer_cb)
+        self.create_timer(1.0 / ODOM_HZ, self._odom_timer_cb)
+        self.create_timer(WATCHDOG_S,     self._watchdog_cb)
 
         threading.Thread(target=self._serial_reader, daemon=True).start()
         self.get_logger().info('arduino_bridge ready.')
 
-    # ── TF / Odom ────────────────────────────────────────────────────────────
+    # ── TF / Odom ─────────────────────────────────────────────────────────
 
     def _publish_tf(self, stamp, x, y, yaw):
         ts = TransformStamped()
@@ -100,7 +106,7 @@ class ArduinoBridge(Node):
         self.y += dc * math.sin(self.yaw)
         self._publish_tf(self.get_clock().now(), self.x, self.y, self.yaw)
 
-    # ── Serial ───────────────────────────────────────────────────────────────
+    # ── Serial ────────────────────────────────────────────────────────────
 
     def _serial_reader(self):
         while rclpy.ok():
@@ -141,33 +147,34 @@ class ArduinoBridge(Node):
                             elif line[:3] == 'US:':
                                 self._handle_ultrasonic(line[3:])
                             elif line not in ('DONE', 'STOPPED', 'READY'):
-                                # Log unknowns (not routine status) to find new formats
-                                self.get_logger().info(f'Arduino raw: {line}')
+                                self.get_logger().info(f'Arduino: {line}')
             except Exception as e:
                 self._ser = None
                 self.get_logger().warn(f'Serial error: {e}, retrying in 2s')
                 time.sleep(2)
 
     def _handle_ultrasonic(self, payload: str):
-        # Expects "US:<front_cm>" or "US:<front_cm>,<rear_cm>"
         try:
-            parts = payload.split(',')
-            front_cm = float(parts[0])
+            front_cm = float(payload.split(',')[0])
             self._us_front_cm = front_cm
-
             msg = Range()
             msg.header.stamp    = self.get_clock().now().to_msg()
             msg.header.frame_id = 'base_link'
             msg.radiation_type  = Range.ULTRASOUND
-            msg.field_of_view   = 0.26   # ~15 degrees
+            msg.field_of_view   = 0.26
             msg.min_range       = 0.02
             msg.max_range       = 4.00
-            msg.range           = front_cm / 100.0  # cm → m
+            msg.range           = front_cm / 100.0
             self.us_pub.publish(msg)
+            # Obstacle: stop if driving forward and something is close
+            if front_cm < US_OBSTACLE_CM and self._current_state == 'FWD':
+                self._send('S')
+                self._current_state = 'STOP'
+                self.get_logger().warn(f'Obstacle {front_cm:.0f}cm — auto-stopped')
         except (ValueError, IndexError):
             pass
 
-    # ── Commands ─────────────────────────────────────────────────────────────
+    # ── Commands ──────────────────────────────────────────────────────────
 
     def _send(self, cmd):
         with self._lock:
@@ -177,54 +184,39 @@ class ArduinoBridge(Node):
             except Exception:
                 pass
 
-    def _drive_timer_cb(self):
-        if self._current_state == 'FWD':
-            # Obstacle check — ultrasonic front
-            if self._us_front_cm < US_OBSTACLE_CM:
-                self._send('S')
-                self._current_state = 'STOP'
-                self.get_logger().warn(
-                    f'Obstacle {self._us_front_cm:.0f}cm ahead — auto-stopped')
-                return
-            speed = min(abs(self._lx), MAX_SPEED_MS)
-            dist  = round(speed * (1.0 / DRIVE_HZ) * 100.0, 1)
-            if dist > 0:
-                self._send(f'F{dist}')
-        elif self._current_state == 'BWD':
-            speed = min(abs(self._lx), MAX_SPEED_MS)
-            dist  = round(speed * (1.0 / DRIVE_HZ) * 100.0, 1)
-            if dist > 0:
-                self._send(f'B{dist}')
-
     def _cmd_cb(self, msg):
+        self._last_cmd_time = time.time()
         lx = msg.linear.x
         az = msg.angular.z
-        self._lx = lx
 
         if abs(lx) < 0.01 and abs(az) < 0.01:
-            # Flask publishes {0,0} continuously when idle — only act on transition
+            # Flask publishes zeros continuously when idle — only act on transition
             if self._current_state != 'STOP':
                 self._send('S')
                 self._current_state = 'STOP'
                 self.get_logger().info('Arduino: S (STOP)')
             return
 
-        if abs(lx) >= 0.01:
-            new_state = 'FWD' if lx > 0 else 'BWD'
-        else:
-            new_state = 'LEFT' if az > 0 else 'RIGHT'
+        new_state = ('FWD'   if lx >  0.01 else
+                     'BWD'   if lx < -0.01 else
+                     'LEFT'  if az >  0.01 else
+                     'RIGHT')
 
         if new_state == self._current_state:
             return
 
         self._current_state = new_state
-        if new_state == 'LEFT':
-            self._send('T10.0')
-            self.get_logger().info('Arduino: T10.0 (LEFT)')
-        elif new_state == 'RIGHT':
-            self._send('T-10.0')
-            self.get_logger().info('Arduino: T-10.0 (RIGHT)')
-        # FWD/BWD: _drive_timer_cb sends incremental F/B
+        cmd = _STATE_CMD[new_state]
+        self._send(cmd)
+        self.get_logger().info(f'Arduino: {cmd} ({new_state})')
+
+    def _watchdog_cb(self):
+        # Safety net only — fires if cmd_vel stops completely (connection lost)
+        if time.time() - self._last_cmd_time > WATCHDOG_S:
+            if self._current_state != 'STOP':
+                self._send('S')
+                self._current_state = 'STOP'
+                self.get_logger().warn('Watchdog: cmd_vel lost — stopped')
 
 
 def main():
