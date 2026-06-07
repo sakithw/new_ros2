@@ -9,6 +9,8 @@ def generate_launch_description():
     slam_cfg = os.path.join(pkg, 'config', 'slam_toolbox.yaml')
     reset_script = os.path.join(pkg, 'scripts', 'reset_lidar.py')
     return LaunchDescription([
+        ExecuteProcess(cmd=['bash', '-c', 'fuser -k /dev/ttyAMA0 2>/dev/null; sleep 0.5'],
+                       output='screen'),
         ExecuteProcess(cmd=['python3', reset_script], output='screen'),
         Node(package='tf2_ros', executable='static_transform_publisher',
              name='base_to_laser_tf', output='screen',
