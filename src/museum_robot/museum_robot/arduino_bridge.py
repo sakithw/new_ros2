@@ -140,8 +140,8 @@ class ArduinoBridge(Node):
                                         pass
                             elif line[:3] == 'US:':
                                 self._handle_ultrasonic(line[3:])
-                            else:
-                                # Log everything else so we can see the format
+                            elif line not in ('DONE', 'STOPPED', 'READY'):
+                                # Log unknowns (not routine status) to find new formats
                                 self.get_logger().info(f'Arduino raw: {line}')
             except Exception as e:
                 self._ser = None
@@ -201,11 +201,12 @@ class ArduinoBridge(Node):
         az = msg.angular.z
         self._lx = lx
 
-        # STOP has absolute priority — always send S immediately
         if abs(lx) < 0.01 and abs(az) < 0.01:
-            self._send('S')
-            self._current_state = 'STOP'
-            self.get_logger().info('Arduino: S (STOP) [priority]')
+            # Flask publishes {0,0} continuously when idle — only act on transition
+            if self._current_state != 'STOP':
+                self._send('S')
+                self._current_state = 'STOP'
+                self.get_logger().info('Arduino: S (STOP)')
             return
 
         if abs(lx) >= 0.01:
