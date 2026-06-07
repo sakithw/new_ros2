@@ -15,7 +15,7 @@ TF_HZ            = 50.0
 ODOM_HZ          = 20.0
 PORT             = '/dev/ttyAMA0'
 BAUD             = 115200
-WATCHDOG_S       = 0.15  # fires 150ms after last cmd_vel
+WATCHDOG_S       = 0.5   # must exceed cmd_vel publish period (~0.2s at 5Hz)
 DRIVE_HZ         = 10.0  # incremental drive timer rate
 MAX_SPEED_MS     = 0.20  # cap linear speed at 20 cm/s for mapping
 
