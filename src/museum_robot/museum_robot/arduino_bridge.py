@@ -15,9 +15,14 @@ TF_HZ            = 50.0
 ODOM_HZ          = 20.0
 PORT             = '/dev/ttyAMA0'
 BAUD             = 115200
-WATCHDOG_S       = 0.3   # shorter = less overshoot after button release
-TURN_STEP_DEG    = 3.0   # degrees per timer tick
-TURN_HZ          = 10.0  # 10 Hz → 30 deg/s max turn rate
+WATCHDOG_S       = 0.15  # fires 150ms after last cmd_vel — stops turn/drive quickly
+
+_STATE_CMD = {
+    'FWD':   'F1000.0',
+    'BWD':   'B1000.0',
+    'LEFT':  'T720.0',
+    'RIGHT': 'T-720.0',
+}
 
 class ArduinoBridge(Node):
     def __init__(self):
@@ -35,7 +40,6 @@ class ArduinoBridge(Node):
         self._publish_tf(self.get_clock().now(), 0.0, 0.0, 0.0)
         self.create_timer(1.0 / TF_HZ,   self._tf_timer_cb)
         self.create_timer(1.0 / ODOM_HZ, self._odom_timer_cb)
-        self.create_timer(1.0 / TURN_HZ, self._turn_timer_cb)
         self.create_timer(WATCHDOG_S,     self._watchdog_cb)
         threading.Thread(target=self._serial_reader, daemon=True).start()
         self.get_logger().info('arduino_bridge ready.')
@@ -163,24 +167,9 @@ class ArduinoBridge(Node):
             return
 
         self._current_state = new_state
-        if new_state == 'STOP':
-            self._send('S')
-            self.get_logger().info('Arduino: S (STOP)')
-        elif new_state == 'FWD':
-            self._send('F1000.0')
-            self.get_logger().info('Arduino: F1000.0 (FWD)')
-        elif new_state == 'BWD':
-            self._send('B1000.0')
-            self.get_logger().info('Arduino: B1000.0 (BWD)')
-        # LEFT/RIGHT: _turn_timer_cb sends incremental steps — no command here
-
-    def _turn_timer_cb(self):
-        # Sends a small fixed step every 0.1s while turning.
-        # Brief tap = 1-2 steps (3-6 deg). Watchdog stops on button release.
-        if self._current_state == 'LEFT':
-            self._send(f'T{TURN_STEP_DEG}')
-        elif self._current_state == 'RIGHT':
-            self._send(f'T-{TURN_STEP_DEG}')
+        cmd = 'S' if new_state == 'STOP' else _STATE_CMD[new_state]
+        self._send(cmd)
+        self.get_logger().info(f'Arduino: {cmd} ({new_state})')
 
     def _watchdog_cb(self):
         if time.time() - self._last_cmd > WATCHDOG_S:
