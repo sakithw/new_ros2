@@ -21,6 +21,7 @@ setup(
         'console_scripts': [
             'arduino_bridge = museum_robot.arduino_bridge:main',
             'scan_filter = museum_robot.scan_filter:main',
+            'lidar_watchdog = museum_robot.lidar_watchdog:main',
             'apriltag_handler = museum_robot.apriltag_handler:main',
         ],
     },

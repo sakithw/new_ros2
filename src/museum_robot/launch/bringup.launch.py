@@ -20,6 +20,9 @@ def generate_launch_description():
              respawn=True, respawn_delay=2.0),
         Node(package='museum_robot', executable='scan_filter',
              name='scan_filter', output='screen',
+             respawn=True, respawn_delay=1.0),
+        Node(package='museum_robot', executable='lidar_watchdog',
+             name='lidar_watchdog', output='screen',
              respawn=True, respawn_delay=2.0),
         TimerAction(period=10.0, actions=[
             Node(package='slam_toolbox',
@@ -30,7 +33,7 @@ def generate_launch_description():
         TimerAction(period=24.0, actions=[
             Node(package='rplidar_ros', executable='rplidar_composition',
                  name='sllidar_node', output='screen',
-                 respawn=True, respawn_delay=25.0,
+                 respawn=True, respawn_delay=15.0,
                  parameters=[{'channel_type':'serial',
                                'serial_port':'/dev/lidar',
                                'serial_baudrate':1000000,
