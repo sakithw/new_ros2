@@ -3,43 +3,51 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import Range
 from tf2_ros import TransformBroadcaster
 import serial, threading, math, time
 
-WHEEL_DIAMETER_M = 0.12
-TRACK_WIDTH_M    = 0.30
-PULSES_PER_REV   = 20
-WHEEL_CIRCUM_M   = math.pi * WHEEL_DIAMETER_M
-TICKS_PER_M      = PULSES_PER_REV / WHEEL_CIRCUM_M
-TF_HZ            = 50.0
-ODOM_HZ          = 20.0
-PORT             = '/dev/ttyAMA0'
-BAUD             = 115200
-WATCHDOG_S       = 0.5   # must exceed cmd_vel publish period (~0.2s at 5Hz)
-DRIVE_HZ         = 10.0  # incremental drive timer rate
-MAX_SPEED_MS     = 0.20  # cap linear speed at 20 cm/s for mapping
+WHEEL_DIAMETER_M  = 0.12
+TRACK_WIDTH_M     = 0.30
+PULSES_PER_REV    = 20
+WHEEL_CIRCUM_M    = math.pi * WHEEL_DIAMETER_M
+TICKS_PER_M       = PULSES_PER_REV / WHEEL_CIRCUM_M
+TF_HZ             = 50.0
+ODOM_HZ           = 20.0
+DRIVE_HZ          = 10.0
+PORT              = '/dev/ttyAMA0'
+BAUD              = 115200
+MAX_SPEED_MS      = 0.20   # cap forward/back speed for mapping
+US_OBSTACLE_CM    = 25.0   # auto-stop if front ultrasonic reads closer than this
+
 
 class ArduinoBridge(Node):
     def __init__(self):
         super().__init__('arduino_bridge')
         self.tf_br    = TransformBroadcaster(self)
         self.odom_pub = self.create_publisher(Odometry, '/odom', 10)
+        self.us_pub   = self.create_publisher(Range, '/ultrasonic', 10)
         self.cmd_sub  = self.create_subscription(Twist, '/cmd_vel', self._cmd_cb, 10)
+
         self.x = self.y = self.yaw = 0.0
         self.prev_l = self.prev_r = None
-        self._last_cmd      = time.time()
         self._last_odom     = time.time()
         self._current_state = 'STOP'
-        self._lx            = 0.0   # latest linear speed from cmd_vel
-        self._ser = None
+        self._lx            = 0.0
+        self._us_front_cm   = 999.0   # last ultrasonic reading (default: clear)
+        self._ser  = None
         self._lock = threading.Lock()
+
         self._publish_tf(self.get_clock().now(), 0.0, 0.0, 0.0)
         self.create_timer(1.0 / TF_HZ,    self._tf_timer_cb)
         self.create_timer(1.0 / ODOM_HZ,  self._odom_timer_cb)
         self.create_timer(1.0 / DRIVE_HZ, self._drive_timer_cb)
-        self.create_timer(WATCHDOG_S,      self._watchdog_cb)
+        # NO watchdog timer — stop button owns stopping
+
         threading.Thread(target=self._serial_reader, daemon=True).start()
         self.get_logger().info('arduino_bridge ready.')
+
+    # ── TF / Odom ────────────────────────────────────────────────────────────
 
     def _publish_tf(self, stamp, x, y, yaw):
         ts = TransformStamped()
@@ -54,12 +62,11 @@ class ArduinoBridge(Node):
         self.tf_br.sendTransform(ts)
 
     def _tf_timer_cb(self):
-        # Always fires at 50 Hz regardless of serial state
         self._publish_tf(self.get_clock().now(), self.x, self.y, self.yaw)
 
     def _odom_timer_cb(self):
-        now  = self.get_clock().now()
-        msg  = Odometry()
+        now = self.get_clock().now()
+        msg = Odometry()
         msg.header.stamp    = now.to_msg()
         msg.header.frame_id = 'odom'
         msg.child_frame_id  = 'base_link'
@@ -75,7 +82,6 @@ class ArduinoBridge(Node):
         self.odom_pub.publish(msg)
 
     def _handle_odom(self, left_ticks, right_ticks, yaw_deg):
-        # Validate ranges
         if abs(left_ticks) >= 1000000 or abs(right_ticks) >= 1000000:
             return
         if yaw_deg < -360.0 or yaw_deg > 360.0:
@@ -83,20 +89,18 @@ class ArduinoBridge(Node):
         self._last_odom = time.time()
         yaw = math.radians(yaw_deg)
         if self.prev_l is None:
-            self.prev_l = left_ticks
-            self.prev_r = right_ticks
-            self.yaw    = yaw
+            self.prev_l, self.prev_r, self.yaw = left_ticks, right_ticks, yaw
             self._publish_tf(self.get_clock().now(), self.x, self.y, self.yaw)
             return
         dl = (left_ticks  - self.prev_l) / TICKS_PER_M
         dr = (right_ticks - self.prev_r) / TICKS_PER_M
-        self.prev_l = left_ticks
-        self.prev_r = right_ticks
-        self.yaw    = yaw
+        self.prev_l, self.prev_r, self.yaw = left_ticks, right_ticks, yaw
         dc = (dl + dr) / 2.0
         self.x += dc * math.cos(self.yaw)
         self.y += dc * math.sin(self.yaw)
         self._publish_tf(self.get_clock().now(), self.x, self.y, self.yaw)
+
+    # ── Serial ───────────────────────────────────────────────────────────────
 
     def _serial_reader(self):
         while rclpy.ok():
@@ -134,11 +138,36 @@ class ArduinoBridge(Node):
                                             float(parts[2]))
                                     except ValueError:
                                         pass
-                            # silently discard non-ODOM lines
+                            elif line[:3] == 'US:':
+                                self._handle_ultrasonic(line[3:])
+                            else:
+                                # Log everything else so we can see the format
+                                self.get_logger().info(f'Arduino raw: {line}')
             except Exception as e:
                 self._ser = None
                 self.get_logger().warn(f'Serial error: {e}, retrying in 2s')
                 time.sleep(2)
+
+    def _handle_ultrasonic(self, payload: str):
+        # Expects "US:<front_cm>" or "US:<front_cm>,<rear_cm>"
+        try:
+            parts = payload.split(',')
+            front_cm = float(parts[0])
+            self._us_front_cm = front_cm
+
+            msg = Range()
+            msg.header.stamp    = self.get_clock().now().to_msg()
+            msg.header.frame_id = 'base_link'
+            msg.radiation_type  = Range.ULTRASOUND
+            msg.field_of_view   = 0.26   # ~15 degrees
+            msg.min_range       = 0.02
+            msg.max_range       = 4.00
+            msg.range           = front_cm / 100.0  # cm → m
+            self.us_pub.publish(msg)
+        except (ValueError, IndexError):
+            pass
+
+    # ── Commands ─────────────────────────────────────────────────────────────
 
     def _send(self, cmd):
         with self._lock:
@@ -149,11 +178,16 @@ class ArduinoBridge(Node):
                 pass
 
     def _drive_timer_cb(self):
-        # Sends incremental F/B every 0.1s scaled to linear.x speed.
-        # This makes the speed slider functional and caps max speed.
         if self._current_state == 'FWD':
+            # Obstacle check — ultrasonic front
+            if self._us_front_cm < US_OBSTACLE_CM:
+                self._send('S')
+                self._current_state = 'STOP'
+                self.get_logger().warn(
+                    f'Obstacle {self._us_front_cm:.0f}cm ahead — auto-stopped')
+                return
             speed = min(abs(self._lx), MAX_SPEED_MS)
-            dist  = round(speed * (1.0 / DRIVE_HZ) * 100.0, 1)  # m/s → cm/tick
+            dist  = round(speed * (1.0 / DRIVE_HZ) * 100.0, 1)
             if dist > 0:
                 self._send(f'F{dist}')
         elif self._current_state == 'BWD':
@@ -163,14 +197,18 @@ class ArduinoBridge(Node):
                 self._send(f'B{dist}')
 
     def _cmd_cb(self, msg):
-        self._last_cmd = time.time()
         lx = msg.linear.x
         az = msg.angular.z
-        self._lx = lx  # always store latest speed
+        self._lx = lx
 
+        # STOP has absolute priority — always send S immediately
         if abs(lx) < 0.01 and abs(az) < 0.01:
-            new_state = 'STOP'
-        elif abs(lx) >= 0.01:
+            self._send('S')
+            self._current_state = 'STOP'
+            self.get_logger().info('Arduino: S (STOP) [priority]')
+            return
+
+        if abs(lx) >= 0.01:
             new_state = 'FWD' if lx > 0 else 'BWD'
         else:
             new_state = 'LEFT' if az > 0 else 'RIGHT'
@@ -179,22 +217,14 @@ class ArduinoBridge(Node):
             return
 
         self._current_state = new_state
-        if new_state == 'STOP':
-            self._send('S')
-            self.get_logger().info('Arduino: S (STOP)')
-        elif new_state == 'LEFT':
+        if new_state == 'LEFT':
             self._send('T10.0')
             self.get_logger().info('Arduino: T10.0 (LEFT)')
         elif new_state == 'RIGHT':
             self._send('T-10.0')
             self.get_logger().info('Arduino: T-10.0 (RIGHT)')
-        # FWD/BWD: _drive_timer_cb handles sending, no command here
+        # FWD/BWD: _drive_timer_cb sends incremental F/B
 
-    def _watchdog_cb(self):
-        if time.time() - self._last_cmd > WATCHDOG_S:
-            if self._current_state != 'STOP':
-                self._send('S')
-                self._current_state = 'STOP'
 
 def main():
     rclpy.init()
