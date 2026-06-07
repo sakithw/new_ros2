@@ -15,14 +15,9 @@ TF_HZ            = 50.0
 ODOM_HZ          = 20.0
 PORT             = '/dev/ttyAMA0'
 BAUD             = 115200
-WATCHDOG_S       = 0.15  # fires 150ms after last cmd_vel — stops turn/drive quickly
-
-_STATE_CMD = {
-    'FWD':   'F1000.0',
-    'BWD':   'B1000.0',
-    'LEFT':  'T10.0',
-    'RIGHT': 'T-10.0',
-}
+WATCHDOG_S       = 0.15  # fires 150ms after last cmd_vel
+DRIVE_HZ         = 10.0  # incremental drive timer rate
+MAX_SPEED_MS     = 0.20  # cap linear speed at 20 cm/s for mapping
 
 class ArduinoBridge(Node):
     def __init__(self):
@@ -32,15 +27,17 @@ class ArduinoBridge(Node):
         self.cmd_sub  = self.create_subscription(Twist, '/cmd_vel', self._cmd_cb, 10)
         self.x = self.y = self.yaw = 0.0
         self.prev_l = self.prev_r = None
-        self._last_cmd     = time.time()
-        self._last_odom    = time.time()
+        self._last_cmd      = time.time()
+        self._last_odom     = time.time()
         self._current_state = 'STOP'
+        self._lx            = 0.0   # latest linear speed from cmd_vel
         self._ser = None
         self._lock = threading.Lock()
         self._publish_tf(self.get_clock().now(), 0.0, 0.0, 0.0)
-        self.create_timer(1.0 / TF_HZ,   self._tf_timer_cb)
-        self.create_timer(1.0 / ODOM_HZ, self._odom_timer_cb)
-        self.create_timer(WATCHDOG_S,     self._watchdog_cb)
+        self.create_timer(1.0 / TF_HZ,    self._tf_timer_cb)
+        self.create_timer(1.0 / ODOM_HZ,  self._odom_timer_cb)
+        self.create_timer(1.0 / DRIVE_HZ, self._drive_timer_cb)
+        self.create_timer(WATCHDOG_S,      self._watchdog_cb)
         threading.Thread(target=self._serial_reader, daemon=True).start()
         self.get_logger().info('arduino_bridge ready.')
 
@@ -151,10 +148,25 @@ class ArduinoBridge(Node):
             except Exception:
                 pass
 
+    def _drive_timer_cb(self):
+        # Sends incremental F/B every 0.1s scaled to linear.x speed.
+        # This makes the speed slider functional and caps max speed.
+        if self._current_state == 'FWD':
+            speed = min(abs(self._lx), MAX_SPEED_MS)
+            dist  = round(speed * (1.0 / DRIVE_HZ) * 100.0, 1)  # m/s → cm/tick
+            if dist > 0:
+                self._send(f'F{dist}')
+        elif self._current_state == 'BWD':
+            speed = min(abs(self._lx), MAX_SPEED_MS)
+            dist  = round(speed * (1.0 / DRIVE_HZ) * 100.0, 1)
+            if dist > 0:
+                self._send(f'B{dist}')
+
     def _cmd_cb(self, msg):
         self._last_cmd = time.time()
         lx = msg.linear.x
         az = msg.angular.z
+        self._lx = lx  # always store latest speed
 
         if abs(lx) < 0.01 and abs(az) < 0.01:
             new_state = 'STOP'
@@ -167,9 +179,16 @@ class ArduinoBridge(Node):
             return
 
         self._current_state = new_state
-        cmd = 'S' if new_state == 'STOP' else _STATE_CMD[new_state]
-        self._send(cmd)
-        self.get_logger().info(f'Arduino: {cmd} ({new_state})')
+        if new_state == 'STOP':
+            self._send('S')
+            self.get_logger().info('Arduino: S (STOP)')
+        elif new_state == 'LEFT':
+            self._send('T10.0')
+            self.get_logger().info('Arduino: T10.0 (LEFT)')
+        elif new_state == 'RIGHT':
+            self._send('T-10.0')
+            self.get_logger().info('Arduino: T-10.0 (RIGHT)')
+        # FWD/BWD: _drive_timer_cb handles sending, no command here
 
     def _watchdog_cb(self):
         if time.time() - self._last_cmd > WATCHDOG_S:
