@@ -3,7 +3,6 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import Range
 from tf2_ros import TransformBroadcaster
 import serial, threading, math, time, termios
 
@@ -17,19 +16,16 @@ ODOM_HZ           = 20.0
 PORT              = '/dev/ttyAMA0'
 BAUD              = 115200
 WATCHDOG_S        = 2.0
-STOP_LOCKOUT_S    = 0.20   # discard motion cmds within 200ms of a STOP send
-US_OBSTACLE_CM    = 20.0   # auto-stop if front ultrasonic < this while driving forward
-REPEAT_HZ         = 5.0    # Hz to repeat drive step commands while button held
-LEFT_TRIM         = 1.0    # wheel speed trim (0.8–1.2); real fix needs Arduino PWM change
-RIGHT_TRIM        = 1.0    # wheel speed trim (0.8–1.2); real fix needs Arduino PWM change
+STOP_LOCKOUT_S    = 0.20
+REPEAT_HZ         = 5.0
 
 # Short-distance step commands — keep robot in ramp phase, limit effective speed.
 # Subsequent steps are re-sent by _drive_repeat_cb while button is held.
 _STEP_CMD = {
-    'FWD':   'F10.0',
-    'BWD':   'B10.0',
-    'LEFT':  'T15.0',
-    'RIGHT': 'T-15.0',
+    'FWD':   'F25.0',
+    'BWD':   'B25.0',
+    'LEFT':  'T10.0',
+    'RIGHT': 'T-10.0',
 }
 
 
@@ -38,7 +34,6 @@ class ArduinoBridge(Node):
         super().__init__('arduino_bridge')
         self.tf_br    = TransformBroadcaster(self)
         self.odom_pub = self.create_publisher(Odometry, '/odom', 10)
-        self.us_pub   = self.create_publisher(Range, '/ultrasonic', 10)
         self.cmd_sub  = self.create_subscription(Twist, '/cmd_vel', self._cmd_cb, 10)
 
         self.x = self.y = self.yaw = 0.0
@@ -47,7 +42,6 @@ class ArduinoBridge(Node):
         self._last_cmd_time  = time.time()
         self._current_state  = 'STOP'
         self._last_stop_sent = 0.0
-        self._us_front_cm    = 999.0
         self._ser  = None
         self._lock = threading.Lock()
 
@@ -169,36 +163,12 @@ class ArduinoBridge(Node):
                                             float(parts[2]))
                                     except ValueError:
                                         pass
-                            elif line[:3] == 'US:':
-                                self._handle_ultrasonic(line[3:])
                             elif line not in ('DONE', 'STOPPED', 'READY'):
                                 self.get_logger().info(f'Arduino: {line}')
             except Exception as e:
                 self._ser = None
                 self.get_logger().warn(f'Serial error: {e}, retrying in 2s')
                 time.sleep(2)
-
-    def _handle_ultrasonic(self, payload: str):
-        try:
-            front_cm = float(payload.split(',')[0])
-            self._us_front_cm = front_cm
-            msg = Range()
-            msg.header.stamp    = self.get_clock().now().to_msg()
-            msg.header.frame_id = 'base_link'
-            msg.radiation_type  = Range.ULTRASOUND
-            msg.field_of_view   = 0.26
-            msg.min_range       = 0.02
-            msg.max_range       = 4.00
-            msg.range           = front_cm / 100.0
-            self.us_pub.publish(msg)
-            if front_cm < US_OBSTACLE_CM:
-                self.get_logger().warn(f'OBSTACLE: {front_cm:.0f}cm')
-                if self._current_state == 'FWD':
-                    self._send('S')
-                    self._current_state = 'STOP'
-                    self._last_stop_sent = time.time()
-        except (ValueError, IndexError):
-            pass
 
     # ── Commands ──────────────────────────────────────────────────────────
 

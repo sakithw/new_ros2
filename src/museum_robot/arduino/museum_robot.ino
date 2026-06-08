@@ -5,7 +5,6 @@
 // IMU    : MPU6050 via Adafruit library
 // Motors : BTS7960 H-Bridge (x2)
 // Encoders: Hall-effect, single-channel
-// Ultrasonic: HC-SR04 front-facing
 // ==========================================
 
 #include <Arduino.h>
@@ -35,9 +34,6 @@ const float WHEEL_CIRCUM_CM    = WHEEL_DIAMETER_CM * PI;
 const float TICKS_PER_CM       = (float)PULSES_PER_REV / WHEEL_CIRCUM_CM;
 const int   DEFAULT_SPEED      = 100;
 const int   TURN_SPEED         = 100;
-// Wheel trim: increase the slower wheel above 1.0 until robot goes straight
-const float LEFT_SPEED_TRIM    = 1.0;   // range 0.8–1.2
-const float RIGHT_SPEED_TRIM   = 1.0;   // range 0.8–1.2
 const float Kp_straight        = 6.0;
 const unsigned long DEBOUNCE_US = 2000;
 
@@ -50,9 +46,6 @@ volatile unsigned long last_right_pulse = 0;
 
 float current_yaw   = 0.0;
 unsigned long last_imu_time = 0;
-
-// Ultrasonic state
-static unsigned long last_us_send = 0;
 
 void left_encoder_isr() {
   unsigned long now = micros();
@@ -70,43 +63,18 @@ void right_encoder_isr() {
   }
 }
 
-// Returns front distance in cm. Non-blocking via short pulseIn timeout.
-float read_ultrasonic_cm() {
-  digitalWrite(TRIG_PIN, LOW);
-  delayMicroseconds(2);
-  digitalWrite(TRIG_PIN, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
-  // 23500 µs timeout ≈ 400 cm max range
-  long duration = pulseIn(ECHO_PIN, HIGH, 23500);
-  if (duration == 0) return 400.0;
-  return duration * 0.01715;  // µs → cm (speed of sound / 2)
-}
-
 void send_telemetry() {
-  static unsigned long last_odom_send = 0;
-  unsigned long now = millis();
-
-  // ODOM at 20 Hz
-  if (now - last_odom_send >= 50) {
-    noInterrupts();
-    long l = left_count;
-    long r = right_count;
-    interrupts();
-    Serial2.print("ODOM:");
-    Serial2.print(l);   Serial2.print(",");
-    Serial2.print(r);   Serial2.print(",");
-    Serial2.println(current_yaw);
-    last_odom_send = now;
-  }
-
-  // Ultrasonic at 5 Hz (every 200 ms)
-  if (now - last_us_send >= 200) {
-    float dist_cm = read_ultrasonic_cm();
-    Serial2.print("US:");
-    Serial2.println(dist_cm, 1);
-    last_us_send = now;
-  }
+  static unsigned long last_telemetry = 0;
+  if (millis() - last_telemetry < 50) return;
+  noInterrupts();
+  long l = left_count;
+  long r = right_count;
+  interrupts();
+  Serial2.print("ODOM:");
+  Serial2.print(l);   Serial2.print(",");
+  Serial2.print(r);   Serial2.print(",");
+  Serial2.println(current_yaw);
+  last_telemetry = millis();
 }
 
 void updateIMU() {
@@ -121,8 +89,6 @@ void updateIMU() {
 }
 
 void setMotors(int leftSpeed, int rightSpeed) {
-  leftSpeed  = constrain((int)(leftSpeed  * LEFT_SPEED_TRIM),  -255, 255);
-  rightSpeed = constrain((int)(rightSpeed * RIGHT_SPEED_TRIM), -255, 255);
   left_dir  = (leftSpeed  >= 0) ? 1 : -1;
   right_dir = (rightSpeed >= 0) ? 1 : -1;
   if (leftSpeed > 0) {
@@ -154,7 +120,6 @@ void travel_distance(float distance_cm, bool forward) {
   long  ramp_pulses = (long)(15.0 * TICKS_PER_CM);
 
   while (true) {
-    // Check for S command
     while (Serial2.available() > 0) {
       char c = Serial2.read();
       if (c == 'S' || c == 's') {
