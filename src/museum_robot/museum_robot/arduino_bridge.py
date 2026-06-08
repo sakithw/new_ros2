@@ -22,8 +22,8 @@ REPEAT_HZ         = 5.0
 # Short-distance step commands — keep robot in ramp phase, limit effective speed.
 # Subsequent steps are re-sent by _drive_repeat_cb while button is held.
 _STEP_CMD = {
-    'FWD':   'F25.0',
-    'BWD':   'B25.0',
+    'FWD':   'F500.0',
+    'BWD':   'B500.0',
     'LEFT':  'T10.0',
     'RIGHT': 'T-10.0',
 }
