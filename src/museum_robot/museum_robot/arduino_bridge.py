@@ -24,8 +24,8 @@ REPEAT_HZ         = 5.0
 _STEP_CMD = {
     'FWD':   'F500.0',
     'BWD':   'B500.0',
-    'LEFT':  'T10.0',
-    'RIGHT': 'T-10.0',
+    'LEFT':  'T-15.0',
+    'RIGHT': 'T15.0',
 }
 
 
