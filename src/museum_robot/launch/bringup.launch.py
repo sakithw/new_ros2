@@ -34,7 +34,7 @@ def generate_launch_description():
         TimerAction(period=24.0, actions=[
             Node(package='rplidar_ros', executable='rplidar_composition',
                  name='sllidar_node', output='screen',
-                 respawn=True, respawn_delay=15.0,
+                 respawn=True, respawn_delay=25.0,
                  parameters=[{'channel_type':'serial',
                                'serial_port':'/dev/lidar',
                                'serial_baudrate':1000000,
