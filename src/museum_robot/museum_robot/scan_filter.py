@@ -12,7 +12,7 @@ class ScanFilterNode(Node):
         sub_qos = QoSProfile(depth=10,
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE)
-        pub_qos = QoSProfile(depth=10,
+        pub_qos = QoSProfile(depth=20,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE)
         self.pub = self.create_publisher(LaserScan, '/scan_filtered', pub_qos)

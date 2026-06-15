@@ -97,7 +97,6 @@ class ArduinoBridge(Node):
         yaw = math.radians(yaw_deg)
         if self.prev_l is None:
             self.prev_l, self.prev_r, self.yaw = left_ticks, right_ticks, yaw
-            self._publish_tf(self.get_clock().now(), self.x, self.y, self.yaw)
             return
         dl = (left_ticks  - self.prev_l) / TICKS_PER_M
         dr = (right_ticks - self.prev_r) / TICKS_PER_M
@@ -105,7 +104,6 @@ class ArduinoBridge(Node):
         dc = (dl + dr) / 2.0
         self.x += dc * math.cos(self.yaw)
         self.y += dc * math.sin(self.yaw)
-        self._publish_tf(self.get_clock().now(), self.x, self.y, self.yaw)
 
     # ── Serial ────────────────────────────────────────────────────────────
 
