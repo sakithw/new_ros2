@@ -8,7 +8,7 @@ slam_toolbox:
     odom_frame: odom
     map_frame: map
     base_frame: base_link
-    scan_topic: /scan_filtered
+    scan_topic: /scan
     mode: mapping
     transform_timeout: 2.0
     tf_buffer_duration: 120.0
