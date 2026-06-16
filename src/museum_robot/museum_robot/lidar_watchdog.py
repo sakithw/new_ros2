@@ -1,7 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
-import subprocess, time, serial
+import subprocess, time, serial, termios
 
 LIDAR_PORT       = '/dev/lidar'
 LIDAR_BAUD       = 1000000
@@ -35,13 +35,26 @@ class LidarWatchdog(Node):
     def _soft_kill(self):
         subprocess.run(['pkill', '-SIGINT', '-f', 'rplidar_composition'], check=False)
 
+    def _clear_hupcl(self, fd: int):
+        """Clear HUPCL so DTR stays asserted after port closes → motor keeps spinning."""
+        attr = termios.tcgetattr(fd)
+        attr[2] &= ~termios.HUPCL
+        termios.tcsetattr(fd, termios.TCSANOW, attr)
+
     def _check_health(self) -> int:
-        """Returns health status byte: 0=OK, 1=warn, 2=error, 255=comm failure."""
+        """Returns health status byte: 0=OK, 1=warn, 2=error, 255=comm failure.
+
+        Asserts DTR (motor power) and clears HUPCL so the motor keeps spinning
+        after this method returns, giving rplidar_composition a warm motor.
+        Waits 5s for the motor to reach operating speed before querying health.
+        """
         try:
             with serial.Serial(LIDAR_PORT, LIDAR_BAUD, timeout=2) as s:
-                s.write(bytes([0xA5, 0x25]))   # STOP
+                self._clear_hupcl(s.fd)   # motor stays on after port releases
+                s.dtr = True
+                s.write(bytes([0xA5, 0x25]))   # STOP any active scan
                 s.flush()
-                time.sleep(0.3)
+                time.sleep(5.0)               # wait for motor to reach operating speed
                 s.reset_input_buffer()
                 s.write(bytes([0xA5, 0x52]))   # GET_HEALTH
                 s.flush()
@@ -58,11 +71,13 @@ class LidarWatchdog(Node):
     def _hw_reset(self):
         try:
             with serial.Serial(LIDAR_PORT, LIDAR_BAUD, timeout=2) as s:
+                self._clear_hupcl(s.fd)   # motor stays on after port releases
+                s.dtr = True
                 s.write(bytes([0xA5, 0x40]))   # RESET
                 s.flush()
                 self.get_logger().info(
                     f'LiDAR hw RESET sent, holding port for {RESET_HOLD_S}s')
-                time.sleep(RESET_HOLD_S)
+                time.sleep(RESET_HOLD_S)   # firmware reboots ~1s, motor spins up ~5s
         except Exception as e:
             self.get_logger().warn(f'LiDAR hw reset error: {e}')
             time.sleep(RESET_HOLD_S)
