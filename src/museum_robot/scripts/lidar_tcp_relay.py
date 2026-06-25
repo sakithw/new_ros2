@@ -21,7 +21,7 @@ REAL_PORT  = '/dev/lidar'
 BAUD       = 1000000
 TCP_HOST   = '127.0.0.1'
 TCP_PORT   = 10660
-RESET_WAIT = 1.2   # seconds — health=0 window opens ~1s after RESET
+RESET_WAIT = 1.8   # seconds — health=0 window opens ~1s after RESET
 
 def main():
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))

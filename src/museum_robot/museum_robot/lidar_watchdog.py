@@ -1,6 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
+from rclpy.qos import qos_profile_sensor_data
 import subprocess, time
 
 SCAN_TIMEOUT_S   = 30.0   # seconds of no /scan before acting
@@ -13,7 +14,7 @@ class LidarWatchdog(Node):
         super().__init__('lidar_watchdog')
         self._last_scan = time.time() + _STARTUP_GRACE_S
         self._acting    = False
-        self.create_subscription(LaserScan, '/scan', self._scan_cb, 10)
+        self.create_subscription(LaserScan, '/scan', self._scan_cb, qos_profile_sensor_data)
         self.create_timer(5.0, self._check_cb)
         self.get_logger().info('lidar_watchdog ready.')
 
