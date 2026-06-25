@@ -8,7 +8,7 @@ def generate_launch_description():
     pkg = get_package_share_directory('museum_robot')
     nav2_cfg = os.path.join(pkg, 'config', 'nav2_params.yaml')
     reset_script = os.path.join(pkg, 'scripts', 'reset_lidar.py')
-    map_yaml = '/home/pi/maps2/museum_map.yaml'
+    map_yaml = '/home/pi/maps/museum_map.yaml'
     return LaunchDescription([
         ExecuteProcess(cmd=['python3', reset_script], output='screen'),
         Node(package='tf2_ros', executable='static_transform_publisher',

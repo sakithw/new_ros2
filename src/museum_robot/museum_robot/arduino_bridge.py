@@ -24,8 +24,8 @@ REPEAT_HZ         = 5.0
 _STEP_CMD = {
     'FWD':   'F500.0',
     'BWD':   'B500.0',
-    'LEFT':  'T-15.0',
-    'RIGHT': 'T15.0',
+    'LEFT':  'T-5.0',
+    'RIGHT': 'T5.0',
 }
 
 
@@ -216,6 +216,8 @@ class ArduinoBridge(Node):
         """Repeat current drive step at REPEAT_HZ while button held."""
         state = self._current_state
         if state == 'STOP':
+            return
+        if state in ('LEFT', 'RIGHT'):
             return
         # Honour lockout: don't re-trigger within 200ms of a stop
         if time.time() - self._last_stop_sent < STOP_LOCKOUT_S:
