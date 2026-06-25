@@ -26,9 +26,9 @@ def generate_launch_description():
                         '--frame-id','base_link','--child-frame-id','laser']),
         Node(package='museum_robot', executable='arduino_bridge',
              name='arduino_bridge', output='screen'),
-        Node(package='museum_robot', executable='lidar_watchdog',
-             name='lidar_watchdog', output='screen',
-             respawn=True, respawn_delay=2.0),
+        # Node(package='museum_robot', executable='lidar_watchdog',
+        #      name='lidar_watchdog', output='screen',
+        #      respawn=True, respawn_delay=2.0),
 
         TimerAction(period=10.0, actions=[
             Node(package='slam_toolbox',
